@@ -8,10 +8,14 @@ const TEMPLATE_NAMESPACE = "5a483c05_306a_44fb_aaf9_1245be4077e7";
 function getTeamNumbers() {
   const raw = process.env.TEAM_MEMBERS_NUMBERS;
   if (!raw || !raw.trim()) return [];
-  return raw
+  const team= raw
     .split(/[\s,]+/)
     .map((n) => n.trim().replace(/^\+/, ""))
     .filter(Boolean);
+
+    console.log("team", team);
+
+    return team;
 }
 
 /**
