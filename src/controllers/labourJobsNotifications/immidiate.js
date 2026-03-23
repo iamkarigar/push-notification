@@ -235,13 +235,31 @@ export const notifyLaboursForNewJobRequirement = async (req, res) => {
       }
     }
 
-    const userWhoPosted = await userModel.findById(job.postedBy).select("name").lean();
+    const userWhoPosted = await userModel
+      .findById(job.postedBy)
+      .select("name pushToken")
+      .lean();
     await notifyTeamForLabourRequirement(
       jobId,
       userWhoPosted?.name,
       job.jobDate,
       job.address.addressLine
     );
+
+    // If no labour could be notified, inform the job poster.
+    if (notificationSentTo === 0 && Expo.isExpoPushToken(userWhoPosted?.pushToken || "")) {
+      try {
+        await sendNotificationUserApp(
+          userWhoPosted.pushToken,
+          "Oh no! labours available right now",
+          "Sorry, there's no labours available at your work location at the moment. Now that you are here, we will hire more labours so you won't have any problems in the future.",
+          { jobId, type: "no_labours_available" }
+        );
+      } catch (e) {
+        console.warn("notifyLaboursForNewJobRequirement: failed to notify job poster", e.message);
+      }
+    }
+
     await LabourRequirementModel.findByIdAndUpdate(jobId, { notificationSentTo });
 
     return res.status(200).json({
