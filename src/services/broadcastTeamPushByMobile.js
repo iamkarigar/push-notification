@@ -100,6 +100,15 @@ export async function notifyTeamNewOrderReceivedExpo(receivedByName, data = {}) 
   });
 }
 
+/** Fixed message — no order/merchant data required. */
+export async function notifyTeamSimpleNewOrderExpo() {
+  return sendExpoToUsersByBroadcastMobiles(
+    "New order",
+    "There is a new order. Please check the dashboard.",
+    { type: "team_new_order_simple" }
+  );
+}
+
 /**
  * Notify team (Expo) that a new labour (worker) registered — ask them to review and verify.
  *

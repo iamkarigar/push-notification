@@ -1,6 +1,9 @@
 import MaterialOrderModel from "../../models/MaterialOrderModel.js";
 import { MerchentModel } from "../../models/MerchentModel.js";
-import { notifyTeamNewOrderReceivedExpo } from "../../services/broadcastTeamPushByMobile.js";
+import {
+  notifyTeamNewOrderReceivedExpo,
+  notifyTeamSimpleNewOrderExpo,
+} from "../../services/broadcastTeamPushByMobile.js";
 
 /**
  * POST body (one of):
@@ -63,6 +66,24 @@ export async function notifyTeamNewOrderHandler(req, res) {
     });
   } catch (error) {
     console.error("notifyTeamNewOrderHandler:", error);
+    return res.status(500).json({ success: false, message: error.message || "Server error" });
+  }
+}
+
+/**
+ * POST — no body required. Sends a generic “new order” Expo to team (`TEAM_EXPO_NOTIFY_MOBILE_NUMBERS`).
+ */
+export async function notifyTeamSimpleNewOrderHandler(req, res) {
+  try {
+    const result = await notifyTeamSimpleNewOrderExpo();
+    const status = result.success ? 200 : 400;
+    return res.status(status).json({
+      success: result.success,
+      message: result.success ? "Team notified" : result.error || result.message || "Failed",
+      teamPush: result,
+    });
+  } catch (error) {
+    console.error("notifyTeamSimpleNewOrderHandler:", error);
     return res.status(500).json({ success: false, message: error.message || "Server error" });
   }
 }
