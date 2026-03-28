@@ -9,10 +9,18 @@ import {
   notifyLabourSelectedForTheJob,
 } from "../controllers/labourJobsNotifications/immidiate.js";
 import { getJobsWithNoApplicationDueForNotify } from "../controllers/labourJobsNotifications/scheduled.js";
+import { notifyTeamNewOrderHandler } from "../controllers/orderNotifications/immidiate.js";
+import { notifyTeamLabourRegisteredHandler } from "../controllers/labourController/immidiate.js";
+import { notifyTeamMerchantLoginHandler } from "../controllers/merchantController/immidiate.js";
+import { notifyTeamUserRegisteredHandler } from "../controllers/userNotifications/immidiate.js";
 
 const router = express.Router();
 
 router.post("/new-merchant-order", sendOrderCreatedNotification);
+router.post("/new-order-notify-team", notifyTeamNewOrderHandler);
+router.post("/labour-registered-notify-team", notifyTeamLabourRegisteredHandler);
+router.post("/merchant-login-notify-team", notifyTeamMerchantLoginHandler);
+router.post("/user-registered-notify-team", notifyTeamUserRegisteredHandler);
 router.post("/order-status-update", createOrderStatusUpdateNotification);
 router.post("/job-applied", sendJobApplicationNotificationToPoster);
 router.post("/job-requirement-notify-labours", notifyLaboursForNewJobRequirement);
