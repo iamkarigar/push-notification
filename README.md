@@ -17,6 +17,25 @@ Copy `.env.example` to `.env` and set:
 - `TEAM_MEMBERS_NUMBERS`, `MSG91_WHATSAPP_INTEGRATED_NUMBER` — team WhatsApp bulk (comma-separated, country code, no `+`)
 - `NEW_ORDER_TEMPLATE_ID` — optional, for merchant new-order SMS
 
+### Change streams (optional)
+
+Requires MongoDB **replica set** (change streams). After the HTTP server starts, watchers listen for **inserts** and run the same logic as the notification APIs via `src/services/teamNotificationBasicFunctions.js` (direct function calls, not HTTP).
+
+- `ENABLE_TEAM_COLLECTION_WATCHERS` — defaults to **enabled** (`true`). Set to `false` to turn off all collection watchers.
+
+Optional per-collection toggles (default `true` when the master flag is on): `ENABLE_TEAM_WATCH_USERS`, `ENABLE_TEAM_WATCH_LABOURS`, `ENABLE_TEAM_WATCH_MERCHANTS`, `ENABLE_TEAM_WATCH_MATERIAL_ORDERS`, `ENABLE_TEAM_WATCH_JOB_REQUIREMENTS`, `ENABLE_TEAM_WATCH_ORDER_INITIATE`.
+
+- `TEAM_WATCH_DEDUPE_MS` — dedupe window for repeated events (default 5 minutes)
+
+| Collection | Same behaviour as API |
+|------------|------------------------|
+| `users` | `POST /api/v1/notifications/user-registered-notify-team` |
+| `labors` | `POST /api/v1/notifications/labour-registered-notify-team` |
+| `merchents` | `POST /api/v1/notifications/merchant-login-notify-team` |
+| `Orders.materials` | `POST /api/v1/notifications/new-order-notify-team` |
+| `Orders.labour_job_requirements` | `POST /api/v1/notifications/job-requirement-notify-labours` |
+| `temp_orders` | `POST /api/v1/notifications/order-initiate-notify-team` |
+
 ## Run
 
 ```bash

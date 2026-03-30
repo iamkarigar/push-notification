@@ -144,39 +144,39 @@ export const sendJobApplicationNotificationToPoster = async (req, res) => {
 };
 
 /**
- * POST body: { jobId }
+ * Same logic as POST `/api/v1/notifications/job-requirement-notify-labours` — callable without HTTP.
+ * @param {string} jobId
+ * @returns {Promise<{ status: number, json: object }>}
  */
-export const notifyLaboursForNewJobRequirement = async (req, res) => {
+export async function runNotifyLaboursForNewJobRequirement(jobId) {
   try {
-    const { jobId } = req.body || {};
-
     if (!jobId) {
-      return res.status(400).json({
-        success: false,
-        message: "jobId is required in body",
-      });
+      return {
+        status: 400,
+        json: { success: false, message: "jobId is required in body" },
+      };
     }
 
     const job = await LabourRequirementModel.findById(jobId).lean();
     if (!job) {
-      return res.status(404).json({ success: false, message: "Job requirement not found" });
+      return { status: 404, json: { success: false, message: "Job requirement not found" } };
     }
 
     const jobCoords = job.address.locationCoords.coordinates;
     if (!Array.isArray(jobCoords) || jobCoords.length < 2) {
-      return res.status(400).json({
-        success: false,
-        message: "Job requirement has no location coordinates",
-      });
+      return {
+        status: 400,
+        json: { success: false, message: "Job requirement has no location coordinates" },
+      };
     }
 
     const jobLng = Number(jobCoords[0]);
     const jobLat = Number(jobCoords[1]);
     if (!Number.isFinite(jobLat) || !Number.isFinite(jobLng)) {
-      return res.status(400).json({
-        success: false,
-        message: "Job location coordinates invalid",
-      });
+      return {
+        status: 400,
+        json: { success: false, message: "Job location coordinates invalid" },
+      };
     }
 
     const jobTypeNorm = (job.jobType || "").trim().toLowerCase();
@@ -246,7 +246,6 @@ export const notifyLaboursForNewJobRequirement = async (req, res) => {
       job.address.addressLine
     );
 
-    // If no labour could be notified, inform the job poster.
     if (notificationSentTo === 0 && Expo.isExpoPushToken(userWhoPosted?.pushToken || "")) {
       try {
         await sendNotificationUserApp(
@@ -262,12 +261,32 @@ export const notifyLaboursForNewJobRequirement = async (req, res) => {
 
     await LabourRequirementModel.findByIdAndUpdate(jobId, { notificationSentTo });
 
-    return res.status(200).json({
-      success: true,
-      message: "Notifications sent to labours",
-      laboursNotified: withinRadius.length,
-      notificationSentTo,
-    });
+    return {
+      status: 200,
+      json: {
+        success: true,
+        message: "Notifications sent to labours",
+        laboursNotified: withinRadius.length,
+        notificationSentTo,
+      },
+    };
+  } catch (error) {
+    console.error("runNotifyLaboursForNewJobRequirement:", error);
+    return {
+      status: 500,
+      json: { success: false, message: error.message || "Failed to send notifications" },
+    };
+  }
+}
+
+/**
+ * POST body: { jobId }
+ */
+export const notifyLaboursForNewJobRequirement = async (req, res) => {
+  try {
+    const { jobId } = req.body || {};
+    const out = await runNotifyLaboursForNewJobRequirement(jobId);
+    return res.status(out.status).json(out.json);
   } catch (error) {
     console.error("notifyLaboursForNewJobRequirement:", error);
     return res.status(500).json({

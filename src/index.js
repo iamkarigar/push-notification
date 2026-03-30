@@ -4,7 +4,7 @@ import { connectDb } from "./config/db.js";
 import { connectMongoose } from "./config/mongoose.js";
 import teamRoutes from "./routes/teamRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
-import { startOrderInitiateWatcher } from "./watchers/orderInitiateWatcher.js";
+import { startTeamCollectionWatchers } from "./watchers/teamCollectionWatchers.js";
 
 const app = express();
 app.use(express.json());
@@ -24,10 +24,9 @@ async function main() {
   console.log("MongoDB native client: ANALYTICS_MONGO_URL (TEAM db for team auth)");
   app.listen(PORT, () => {
     console.log(`Karigar Notifications listening on port ${PORT}`);
+    // Change streams → internal HTTP calls; start after listen so fetch() succeeds.
+    startTeamCollectionWatchers();
   });
-
-  // Starts only when ENABLE_ORDER_INITIATE_WATCHER=true
-  startOrderInitiateWatcher({ port: PORT });
 }
 
 main().catch((err) => {
