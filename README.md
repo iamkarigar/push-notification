@@ -45,6 +45,7 @@ npm run dev
 |--------|------|-------------|
 | POST | `/api/v1/notifications/new-merchant-order` | Merchant Expo + SMS (new material order) |
 | POST | `/api/v1/notifications/order-status-update` | User Expo (order status) |
+| POST | `/api/v1/notifications/order-initiate-notify-team` | Team Expo: someone is trying to buy XYZ material for XYZ amount |
 | POST | `/api/v1/notifications/job-requirement-application` | Poster Expo (labour applied) |
 | POST | `/api/v1/notifications/job-requirement-notify-labours` | Nearby labours Expo + **team WhatsApp** (`notifyTeamForLabourRequirement`) |
 | GET | `/api/v1/notifications/job-requirement-no-application-due` | List jobs with no applications (scheduled helper) |

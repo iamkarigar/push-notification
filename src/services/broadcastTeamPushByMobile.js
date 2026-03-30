@@ -110,6 +110,24 @@ export async function notifyTeamSimpleNewOrderExpo() {
 }
 
 /**
+ * Notify team (Expo) when a checkout is initiated (payment pending).
+ *
+ * @param {string} materialName - product/material label
+ * @param {string|number} amount - order amount shown in notification
+ * @param {Record<string, unknown>} [data] - extra payload (e.g. orderId, userId)
+ */
+export async function notifyTeamOrderInitiatedExpo(materialName, amount, data = {}) {
+  const safeMaterial = String(materialName || "").trim() || "material";
+  const safeAmount = String(amount ?? "").trim() || "0";
+  const title = "Order initiated";
+  const text = `Someone is trying to buy ${safeMaterial} for ${safeAmount}.`;
+  return sendExpoToUsersByBroadcastMobiles(title, text, {
+    type: "team_order_initiated",
+    ...data,
+  });
+}
+
+/**
  * Notify team (Expo) that a new labour (worker) registered — ask them to review and verify.
  *
  * @param {string} labourLabel - display name and/or phone for the push body

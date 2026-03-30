@@ -11,6 +11,7 @@ import {
 import { getJobsWithNoApplicationDueForNotify } from "../controllers/labourJobsNotifications/scheduled.js";
 import {
   notifyTeamNewOrderHandler,
+  notifyTeamOrderInitiateHandler,
   notifyTeamSimpleNewOrderHandler,
 } from "../controllers/orderNotifications/immidiate.js";
 import { notifyTeamLabourRegisteredHandler } from "../controllers/labourController/immidiate.js";
@@ -22,6 +23,7 @@ const router = express.Router();
 router.post("/new-merchant-order", sendOrderCreatedNotification);
 router.post("/new-order-notify-team", notifyTeamNewOrderHandler);
 router.post("/new-order-simple-notify-team", notifyTeamSimpleNewOrderHandler);
+router.post("/order-initiate-notify-team", notifyTeamOrderInitiateHandler);
 router.post("/labour-registered-notify-team", notifyTeamLabourRegisteredHandler);
 router.post("/merchant-login-notify-team", notifyTeamMerchantLoginHandler);
 router.post("/user-registered-notify-team", notifyTeamUserRegisteredHandler);
