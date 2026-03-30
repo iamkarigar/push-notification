@@ -243,7 +243,8 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       jobId,
       userWhoPosted?.name,
       job.jobDate,
-      job.address.addressLine
+      job.address?.addressLine,
+      job.jobType || ""
     );
 
     if (notificationSentTo === 0 && Expo.isExpoPushToken(userWhoPosted?.pushToken || "")) {

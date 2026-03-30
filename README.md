@@ -66,11 +66,11 @@ npm run dev
 | POST | `/api/v1/notifications/order-status-update` | User Expo (order status) |
 | POST | `/api/v1/notifications/order-initiate-notify-team` | Team Expo: someone is trying to buy XYZ material for XYZ amount |
 | POST | `/api/v1/notifications/job-requirement-application` | Poster Expo (labour applied) |
-| POST | `/api/v1/notifications/job-requirement-notify-labours` | Nearby labours Expo + **team WhatsApp** (`notifyTeamForLabourRequirement`) |
+| POST | `/api/v1/notifications/job-requirement-notify-labours` | Nearby labours Expo + **team Expo** (`notifyTeamForLabourRequirement` in `teamNotifications.js`) |
 | GET | `/api/v1/notifications/job-requirement-no-application-due` | List jobs with no applications (scheduled helper) |
 | POST | `/api/v1/notifications/job-requirement-labour-selected` | Labour selected: Expo to labour + **team WhatsApp** (`notifyTeamAboutLabourSelectionOnWhatsapp`) — *added here; not wired on original server* |
 
-Team WhatsApp helpers live in `src/services/teamNotifications.js` and `src/services/teamWhatsappNotifications.js`.
+Team **Expo** alerts for job/material flows live in `src/services/teamNotifications.js`; **WhatsApp** helpers in `src/services/teamWhatsappNotifications.js`.
 
 ## Requirements
 

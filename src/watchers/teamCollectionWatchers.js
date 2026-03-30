@@ -140,12 +140,12 @@ export function startTeamCollectionWatchers() {
   const runJobs = whenSub("ENABLE_TEAM_WATCH_JOB_REQUIREMENTS", true);
   const runOrderInitiate = whenSub("ENABLE_TEAM_WATCH_ORDER_INITIATE", true);
 
-  if (!runUsers && !runLabours && !runMerchants && !runMaterials && !runJobs && !runOrderInitiate) {
-    console.log(
-      "[team-collection-watchers] all disabled (ENABLE_TEAM_COLLECTION_WATCHERS=false or every sub-flag false)"
-    );
-    return { stop: async () => {} };
-  }
+  // if (!runUsers && !runLabours && !runMerchants && !runMaterials && !runJobs && !runOrderInitiate) {
+  //   console.log(
+  //     "[team-collection-watchers] all disabled (ENABLE_TEAM_COLLECTION_WATCHERS=false or every sub-flag false)"
+  //   );
+  //   return { stop: async () => {} };
+  // }
 
   if (runUsers) {
     stoppers.push(
