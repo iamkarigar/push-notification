@@ -4,6 +4,7 @@ import { connectDb } from "./config/db.js";
 import { connectMongoose } from "./config/mongoose.js";
 import teamRoutes from "./routes/teamRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
+import { startOrderInitiateWatcher } from "./watchers/orderInitiateWatcher.js";
 
 const app = express();
 app.use(express.json());
@@ -24,6 +25,9 @@ async function main() {
   app.listen(PORT, () => {
     console.log(`Karigar Notifications listening on port ${PORT}`);
   });
+
+  // Starts only when ENABLE_ORDER_INITIATE_WATCHER=true
+  startOrderInitiateWatcher({ port: PORT });
 }
 
 main().catch((err) => {
