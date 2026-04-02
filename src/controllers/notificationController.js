@@ -1,8 +1,8 @@
 import { Expo } from "expo-server-sdk";
 import { MerchentModel } from "../models/MerchentModel.js";
 import MaterialOrderModel from "../models/MaterialOrderModel.js";
-import userModel from "../models/UserModel.js";
 import { sendNewOrderSMS } from "./smsController.js";
+import { notifyUserMaterialOrderStatusFromDoc } from "../services/materialOrderUserNotifications.js";
 
 const expo = new Expo();
 
@@ -175,45 +175,25 @@ export const createOrderStatusUpdateNotification = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
-    const userId = orderDoc.userId;
-    if (!userId) {
-      return res
-        .status(400)
-        .json({ success: false, message: "User not found for order" });
+    const out = await notifyUserMaterialOrderStatusFromDoc(orderDoc, {
+      title,
+      description,
+      data,
+    });
+
+    if (!out.success) {
+      const status =
+        out.message === "User not found for order" ||
+        out.message === "User push token not found"
+          ? 400
+          : 500;
+      return res.status(status).json({ success: false, message: out.message });
     }
-
-    const user = await userModel.findById(userId).lean();
-    if (!user?.pushToken) {
-      return res.status(400).json({
-        success: false,
-        message: "User push token not found",
-      });
-    }
-
-    const orderStatus =  orderDoc.orderStatus ;
-    const itemName = orderDoc.productName || "your product";
-    const notifyTitle =  `Order status  updated to ${orderStatus}`;
-    const notifyDescription =
-      description ||
-      `Your order for ${itemName} has been ${orderStatus}.`;
-
-    const sendResults = await sendNotificationLabourApp(
-      user.pushToken,
-      notifyTitle,
-      notifyDescription,
-      {
-        screen: "order-details",
-        orderId: orderDoc._id,
-        userId: user._id,
-        status: orderStatus,
-        ...(data || {}),
-      }
-    );
 
     return res.json({
       success: true,
       message: "Notification sent",
-      results: sendResults,
+      results: out.results,
     });
   } catch (error) {
     console.error("Error sending order status notification:", error);

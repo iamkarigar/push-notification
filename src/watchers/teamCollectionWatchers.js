@@ -12,6 +12,7 @@ import {
   notifyTeamOrderInitiateBasic,
   notifyLaboursForNewJobRequirementBasic,
 } from "../services/teamNotificationBasicFunctions.js";
+import { notifyUserMaterialOrderStatusFromDoc } from "../services/materialOrderUserNotifications.js";
 
 function toBool(val, defaultValue = false) {
   if (val == null) return defaultValue;
@@ -107,6 +108,81 @@ function startInsertWatcher({ logPrefix, collection, onInsert, getDedupeKey, ena
   };
 }
 
+/**
+ * Watches **updates** where `orderStatus` is modified; `fullDocument` is the document after update.
+ */
+function startMaterialOrderStatusUpdateWatcher({ logPrefix, collection, getDedupeKey, enabled }) {
+  if (!enabled) {
+    console.log(`${logPrefix} disabled`);
+    return { stop: async () => {} };
+  }
+
+  const seenRecently = createDeduper(5 * 60 * 1000);
+  const pipeline = [
+    {
+      $match: {
+        operationType: "update",
+        "updateDescription.updatedFields.orderStatus": { $exists: true },
+      },
+    },
+  ];
+  let changeStream = null;
+  let stopped = false;
+
+  async function open() {
+    if (stopped) return;
+    try {
+      changeStream = collection.watch(pipeline, { fullDocument: "updateLookup" });
+      console.log(`${logPrefix} watching orderStatus updates on ${collection.collectionName}`);
+
+      changeStream.on("change", async (event) => {
+        try {
+          const doc = event?.fullDocument;
+          if (!doc) return;
+          const key = getDedupeKey(doc);
+          if (!key || seenRecently(key)) return;
+          const out = await notifyUserMaterialOrderStatusFromDoc(doc);
+          if (!out.success) {
+            console.warn(`${logPrefix} skip or failed:`, out.message || out);
+          }
+        } catch (err) {
+          console.error(`${logPrefix} change handler error:`, err?.message || err);
+        }
+      });
+
+      changeStream.on("error", (err) => {
+        console.error(`${logPrefix} stream error:`, err?.message || err);
+        try {
+          changeStream?.close();
+        } catch (_) {}
+        changeStream = null;
+        setTimeout(open, 2000);
+      });
+
+      changeStream.on("close", () => {
+        if (stopped) return;
+        console.warn(`${logPrefix} stream closed; reopening`);
+        changeStream = null;
+        setTimeout(open, 2000);
+      });
+    } catch (err) {
+      console.error(`${logPrefix} failed to start:`, err?.message || err);
+      setTimeout(open, 3000);
+    }
+  }
+
+  open();
+
+  return {
+    stop: async () => {
+      stopped = true;
+      try {
+        await changeStream?.close();
+      } catch (_) {}
+    },
+  };
+}
+
 function logFailed(prefix, out) {
   if (out.json?.success) return;
   console.error(prefix, out.status, out.json?.message || out.json);
@@ -128,7 +204,8 @@ function whenSub(name, defaultTrue = true) {
  * `ENABLE_TEAM_COLLECTION_WATCHERS` defaults to **true** (set to `false` to disable all watchers).
  * Optional per-stream toggles (default true when master is on):
  * `ENABLE_TEAM_WATCH_USERS`, `ENABLE_TEAM_WATCH_LABOURS`, `ENABLE_TEAM_WATCH_MERCHANTS`,
- * `ENABLE_TEAM_WATCH_MATERIAL_ORDERS`, `ENABLE_TEAM_WATCH_JOB_REQUIREMENTS`, `ENABLE_TEAM_WATCH_ORDER_INITIATE`.
+ * `ENABLE_TEAM_WATCH_MATERIAL_ORDERS`, `ENABLE_TEAM_WATCH_MATERIAL_ORDER_STATUS`,
+ * `ENABLE_TEAM_WATCH_JOB_REQUIREMENTS`, `ENABLE_TEAM_WATCH_ORDER_INITIATE`.
  */
 export function startTeamCollectionWatchers() {
   const stoppers = [];
@@ -137,6 +214,7 @@ export function startTeamCollectionWatchers() {
   const runLabours = whenSub("ENABLE_TEAM_WATCH_LABOURS", true);
   const runMerchants = whenSub("ENABLE_TEAM_WATCH_MERCHANTS", true);
   const runMaterials = whenSub("ENABLE_TEAM_WATCH_MATERIAL_ORDERS", true);
+  const runMaterialOrderStatus = whenSub("ENABLE_TEAM_WATCH_MATERIAL_ORDER_STATUS", true);
   const runJobs = whenSub("ENABLE_TEAM_WATCH_JOB_REQUIREMENTS", true);
   const runOrderInitiate = whenSub("ENABLE_TEAM_WATCH_ORDER_INITIATE", true);
 
@@ -202,6 +280,17 @@ export function startTeamCollectionWatchers() {
           const out = await notifyTeamNewOrderBasic({ order_id: String(doc._id) });
           logFailed("[team-watch-material-orders]", out);
         },
+        enabled: true,
+      })
+    );
+  }
+
+  if (runMaterialOrderStatus) {
+    stoppers.push(
+      startMaterialOrderStatusUpdateWatcher({
+        logPrefix: "[team-watch-material-order-status]",
+        collection: MaterialOrderModel.collection,
+        getDedupeKey: (doc) => `${String(doc._id)}:${String(doc.orderStatus ?? "")}`,
         enabled: true,
       })
     );
