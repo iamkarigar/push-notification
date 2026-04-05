@@ -4,6 +4,7 @@ import userModel from "../../models/UserModel.js";
 import {
   sendNotificationLabourAppBulk,
   sendNotificationUserApp,
+  sendNotificationUserAppBulk,
 } from "../notificationController.js";
 import { Expo } from "expo-server-sdk";
 import { notifyTeamForLabourRequirement } from "../../services/teamNotifications.js";
@@ -110,6 +111,155 @@ async function sendLabourAppBulkChunked(tokens, title, body, data) {
   return anyOk;
 }
 
+/** Poster user app: `pushTokens` (newer at end of array first), then `pushToken`. */
+function resolveAllUserExpoTokens(user) {
+  if (!user) return [];
+  const seen = new Set();
+  const out = [];
+  const push = (raw) => {
+    const t = raw != null ? String(raw).trim() : "";
+    if (!t || seen.has(t)) return;
+    if (!Expo.isExpoPushToken(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  if (Array.isArray(user.pushTokens)) {
+    for (let i = user.pushTokens.length - 1; i >= 0; i--) {
+      push(user.pushTokens[i]);
+    }
+  }
+  if (user.pushToken) push(user.pushToken);
+  return out;
+}
+
+async function sendUserAppBulkChunked(tokens, title, body, data) {
+  let anyOk = false;
+  for (let i = 0; i < tokens.length; i += EXPO_PUSH_CHUNK) {
+    const slice = tokens.slice(i, i + EXPO_PUSH_CHUNK);
+    const res = await sendNotificationUserAppBulk(slice, title, body, data);
+    if (res?.tickets?.some((t) => t?.status === "ok")) anyOk = true;
+  }
+  return anyOk;
+}
+
+/**
+ * Same as POST `/api/v1/notifications/job-applied` — callable from change streams (no HTTP).
+ * @param {string} jobId — labour requirement `_id`
+ * @param {string} labourId — worker `_id`
+ * @returns {Promise<{ success: boolean, statusCode: number, notificationSent: boolean, message: string }>}
+ */
+export async function runNotifyPosterOfJobApplication(jobId, labourId) {
+  try {
+    if (!jobId || !labourId) {
+      return {
+        success: false,
+        statusCode: 400,
+        notificationSent: false,
+        message: "jobId and labourId are required",
+      };
+    }
+
+    const job = await LabourRequirementModel.findById(jobId).lean();
+    if (!job) {
+      return {
+        success: false,
+        statusCode: 404,
+        notificationSent: false,
+        message: "Job requirement not found",
+      };
+    }
+
+    const posterUserId = job.postedBy;
+    if (!posterUserId) {
+      return {
+        success: false,
+        statusCode: 400,
+        notificationSent: false,
+        message: "Job has no poster (postedBy)",
+      };
+    }
+
+    const labour = await LaborModel.findById(labourId).select("name").lean();
+    if (!labour) {
+      return {
+        success: false,
+        statusCode: 404,
+        notificationSent: false,
+        message: "Labour not found",
+      };
+    }
+
+    const user = await userModel.findById(posterUserId).select("pushToken pushTokens").lean();
+    if (!user) {
+      return {
+        success: false,
+        statusCode: 404,
+        notificationSent: false,
+        message: "User (job poster) not found",
+      };
+    }
+
+    const posterTokens = resolveAllUserExpoTokens(user);
+    if (!posterTokens.length) {
+      return {
+        success: false,
+        statusCode: 400,
+        notificationSent: false,
+        message: "User has not enabled push notifications",
+      };
+    }
+
+    const labourName = (labour.name && String(labour.name).trim()) || "A worker";
+    const title = "Someone is interested in your job";
+    const messageBody = `${labourName} is interested to come and work on your requirement. Open the app to review their profile and confirm.`;
+
+    const pushData = {
+      jobId,
+      labourId,
+      type: "job_requirement_application",
+    };
+
+    let notificationSent = false;
+    try {
+      console.log(
+        `[job-applied] notifying poster (jobId=${jobId}, labourId=${labourId}, tokens=${posterTokens.length})`
+      );
+      const accepted = await sendUserAppBulkChunked(
+        posterTokens,
+        title,
+        messageBody,
+        pushData
+      );
+      if (accepted) {
+        notificationSent = true;
+      } else {
+        console.warn("runNotifyPosterOfJobApplication: no ok ticket from Expo");
+      }
+    } catch (sendErr) {
+      console.error("runNotifyPosterOfJobApplication: send failed", sendErr);
+    }
+
+    await LabourRequirementModel.findByIdAndUpdate(jobId, { notificationSent });
+
+    return {
+      success: true,
+      statusCode: 200,
+      notificationSent,
+      message: notificationSent
+        ? "Notification sent to job poster"
+        : "Notification not accepted by Expo (poster may still get nothing)",
+    };
+  } catch (error) {
+    console.error("runNotifyPosterOfJobApplication:", error);
+    return {
+      success: false,
+      statusCode: 500,
+      notificationSent: false,
+      message: error.message || "Failed to send notification",
+    };
+  }
+}
+
 /**
  * POST body: { jobId, labourId }
  * Sends Expo push to the user who posted the job requirement
@@ -127,63 +277,11 @@ export const sendJobApplicationNotificationToPoster = async (req, res) => {
       });
     }
 
-    const job = await LabourRequirementModel.findById(jobId).lean();
-    if (!job) {
-      return res.status(404).json({ success: false, message: "Job requirement not found" });
-    }
-
-    const posterUserId = job.postedBy;
-    if (!posterUserId) {
-      return res.status(400).json({ success: false, message: "Job has no poster (postedBy)" });
-    }
-
-    const labour = await LaborModel.findById(labourId).select("name").lean();
-    if (!labour) {
-      return res.status(404).json({ success: false, message: "Labour not found" });
-    }
-
-    const user = await userModel.findById(posterUserId).select("pushToken").lean();
-    if (!user) {
-      return res.status(404).json({ success: false, message: "User (job poster) not found" });
-    }
-
-    if (!user.pushToken || !Expo.isExpoPushToken(user.pushToken)) {
-      return res.status(400).json({
-        success: false,
-        message: "User has not enabled push notifications",
-      });
-    }
-
-    const labourName = labour.name || "A worker";
-    const title = "New application for your requirement";
-    const messageBody = `${labourName} applied for your requirement tomorrow, please review it and select and confirm on call.`;
-
-    let notificationSent = false;
-    try {
-      const result = await sendNotificationUserApp(user.pushToken, title, messageBody, {
-        jobId,
-        labourId,
-        type: "job_requirement_application",
-      });
-      const tickets = result?.tickets || [];
-      // Expo accepts the message when ticket.status === "ok". Receipts are often still
-      // "pending" if fetched immediately — do not treat that as failure.
-      const accepted = tickets.some((t) => t && t.status === "ok");
-      if (accepted) {
-        notificationSent = true;
-      } else {
-        console.warn("sendJobApplicationNotificationToPoster: no ok ticket from Expo", tickets);
-      }
-    } catch (sendErr) {
-      console.error("sendJobApplicationNotificationToPoster: send failed", sendErr);
-    }
-
-    await LabourRequirementModel.findByIdAndUpdate(jobId, { notificationSent });
-
-    return res.status(200).json({
-      success: true,
-      message: "Notification sent to job poster",
-      notificationSent,
+    const out = await runNotifyPosterOfJobApplication(jobId, labourId);
+    return res.status(out.statusCode).json({
+      success: out.success,
+      message: out.message,
+      notificationSent: out.notificationSent,
     });
   } catch (error) {
     console.error("sendJobApplicationNotificationToPoster:", error);

@@ -29,6 +29,29 @@ export const sendNotificationUserApp = async (token, title, description, data = 
   const tickets = await expo.sendPushNotificationsAsync(messages);
   return { success: true, tickets };
 };
+
+export const sendNotificationUserAppBulk = async (tokens, title, description, data = {}) => {
+  
+  console.log(tokens);
+  
+  if (!tokens?.length) {
+    return { success: false, message: "Missing push tokens" };
+  }
+  const client = new Expo();
+  const messages = tokens.map((token) => ({
+    to: token,
+    title,
+    body: description,
+    data: data || {},
+    channelId: "custom-sound-channel",
+    sound: "normal_notification.wav",
+    priority: "high",
+    _contentAvailable: true,
+  }));
+  const tickets = await client.sendPushNotificationsAsync(messages);
+  return { success: true, tickets };
+};
+
 export const sendNotificationLabourApp = async (token, title, description, data = {}) => {
   if (!token) {
     return { success: false, message: "Missing push token" };

@@ -4,6 +4,7 @@ import { LaborModel } from "../models/laborModel.js";
 import { MerchentModel } from "../models/MerchentModel.js";
 import MaterialOrderModel from "../models/MaterialOrderModel.js";
 import { LabourRequirementModel } from "../models/labourRequirementModel.js";
+import { LabourApplyModel } from "../models/labourApplyModel.js";
 import {
   notifyTeamUserRegisteredBasic,
   notifyTeamLabourRegisteredBasic,
@@ -13,6 +14,7 @@ import {
   notifyLaboursForNewJobRequirementBasic,
 } from "../services/teamNotificationBasicFunctions.js";
 import { notifyUserMaterialOrderStatusFromDoc } from "../services/materialOrderUserNotifications.js";
+import { runNotifyPosterOfJobApplication } from "../controllers/labourJobsNotifications/immidiate.js";
 
 function toBool(val, defaultValue = false) {
   if (val == null) return defaultValue;
@@ -205,7 +207,8 @@ function whenSub(name, defaultTrue = true) {
  * Optional per-stream toggles (default true when master is on):
  * `ENABLE_TEAM_WATCH_USERS`, `ENABLE_TEAM_WATCH_LABOURS`, `ENABLE_TEAM_WATCH_MERCHANTS`,
  * `ENABLE_TEAM_WATCH_MATERIAL_ORDERS`, `ENABLE_TEAM_WATCH_MATERIAL_ORDER_STATUS`,
- * `ENABLE_TEAM_WATCH_JOB_REQUIREMENTS`, `ENABLE_TEAM_WATCH_ORDER_INITIATE`.
+ * `ENABLE_TEAM_WATCH_JOB_REQUIREMENTS`, `ENABLE_TEAM_WATCH_JOB_APPLICATIONS`,
+ * `ENABLE_TEAM_WATCH_ORDER_INITIATE`.
  */
 export function startTeamCollectionWatchers() {
   const stoppers = [];
@@ -216,6 +219,7 @@ export function startTeamCollectionWatchers() {
   const runMaterials = whenSub("ENABLE_TEAM_WATCH_MATERIAL_ORDERS", true);
   const runMaterialOrderStatus = whenSub("ENABLE_TEAM_WATCH_MATERIAL_ORDER_STATUS", true);
   const runJobs = whenSub("ENABLE_TEAM_WATCH_JOB_REQUIREMENTS", true);
+  const runJobApplications = whenSub("ENABLE_TEAM_WATCH_JOB_APPLICATIONS", true);
   const runOrderInitiate = whenSub("ENABLE_TEAM_WATCH_ORDER_INITIATE", true);
 
   // if (!runUsers && !runLabours && !runMerchants && !runMaterials && !runJobs && !runOrderInitiate) {
@@ -305,6 +309,41 @@ export function startTeamCollectionWatchers() {
         onInsert: async (doc) => {
           const out = await notifyLaboursForNewJobRequirementBasic(String(doc._id));
           logFailed("[team-watch-job-requirements]", out);
+        },
+        enabled: true,
+      })
+    );
+  }
+
+  if (runJobApplications) {
+    stoppers.push(
+      startInsertWatcher({
+        logPrefix: "[team-watch-job-applications]",
+        collection: LabourApplyModel.collection,
+        getDedupeKey: (doc) => String(doc._id),
+        onInsert: async (doc) => {
+          const jobId = doc.labourJobId != null ? String(doc.labourJobId) : "";
+          const labourId = doc.labourId != null ? String(doc.labourId) : "";
+          if (!jobId || !labourId) {
+            console.warn(
+              "[team-watch-job-applications] missing labourJobId or labourId on",
+              doc?._id
+            );
+            return;
+          }
+          const out = await runNotifyPosterOfJobApplication(jobId, labourId);
+          if (!out.success) {
+            console.warn(
+              "[team-watch-job-applications]",
+              out.statusCode,
+              out.message
+            );
+          } else if (!out.notificationSent) {
+            console.warn(
+              "[team-watch-job-applications] Expo did not accept push",
+              { jobId, labourId }
+            );
+          }
         },
         enabled: true,
       })
