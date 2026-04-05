@@ -29,6 +29,8 @@ router.post("/merchant-login-notify-team", notifyTeamMerchantLoginHandler);
 router.post("/user-registered-notify-team", notifyTeamUserRegisteredHandler);
 router.post("/order-status-update", createOrderStatusUpdateNotification);
 router.post("/job-applied", sendJobApplicationNotificationToPoster);
+/** Alias — same handler (some clients call this path from docs / main server) */
+router.post("/job-requirement-application", sendJobApplicationNotificationToPoster);
 router.post("/job-requirement-notify-labours", notifyLaboursForNewJobRequirement);
 router.get("/job-requirement-no-application-due", getJobsWithNoApplicationDueForNotify);
 /** Not in original server routes — team WhatsApp + labour Expo when a worker is selected */

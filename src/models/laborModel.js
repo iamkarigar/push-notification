@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 
-
-
+/** Worker profiles: always `karigarDB.labors` (same as main Karigar server). */
+const laborDb = mongoose.connection.useDb("karigarDB");
 
 const laborSchema = new mongoose.Schema({
   name: {
@@ -129,7 +129,15 @@ const laborSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  pushTokens: {
+    type: [String],
+    default: [],
+  },
+},
+{
+  collection: "labors",
 });
 
-export const LaborModel = mongoose.model("Labor", laborSchema);
+export const LaborModel =
+  laborDb.models.Labor || laborDb.model("Labor", laborSchema);
 // export const LaborOtpModel = mongoose.model("laborOtp", LaborOtp);

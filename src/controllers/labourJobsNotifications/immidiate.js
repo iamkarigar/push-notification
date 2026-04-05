@@ -2,7 +2,7 @@ import { LabourRequirementModel } from "../../models/labourRequirementModel.js";
 import { LaborModel } from "../../models/laborModel.js";
 import userModel from "../../models/UserModel.js";
 import {
-  sendNotificationLabourApp,
+  sendNotificationLabourAppBulk,
   sendNotificationUserApp,
 } from "../notificationController.js";
 import { Expo } from "expo-server-sdk";
@@ -10,6 +10,35 @@ import { notifyTeamForLabourRequirement } from "../../services/teamNotifications
 import { notifyTeamAboutLabourSelectionOnWhatsapp } from "../../services/teamWhatsappNotifications.js";
 
 const LABOUR_WORK_RADIUS_KM = 15;
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Job `jobType` is normalized lowercase (e.g. carpenter). Labour `designation` may be
+ * "Carpenter", "Wood carpenter", or only listed under `skillSet[].type` — strict ^type$ missed those.
+ */
+function labourMatchesJobType(labour, jobTypeNorm) {
+  if (!jobTypeNorm) return false;
+  if (jobTypeNorm === "other") return true;
+
+  const d = (labour.designation || "").trim().toLowerCase();
+  if (d === jobTypeNorm) return true;
+  if (d.includes(jobTypeNorm)) return true;
+
+  const word = new RegExp(`\\b${escapeRegex(jobTypeNorm)}\\b`, "i");
+  if (word.test(labour.designation || "")) return true;
+
+  const skills = labour.skillSet || [];
+  for (const s of skills) {
+    const skillName =
+      s && typeof s === "object" && s.type != null ? String(s.type) : String(s || "");
+    const sn = skillName.trim().toLowerCase();
+    if (sn === jobTypeNorm || sn.includes(jobTypeNorm) || word.test(skillName)) return true;
+  }
+  return false;
+}
 
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
@@ -48,18 +77,53 @@ function getLabourCoords(labour) {
   return null;
 }
 
+const EXPO_PUSH_CHUNK = 99;
+
+/** All unique valid Expo tokens: `pushTokens` (newer entries later in array first), then `pushToken`. */
+function resolveAllLabourExpoTokens(labour) {
+  if (!labour) return [];
+  const seen = new Set();
+  const out = [];
+  const push = (raw) => {
+    const t = raw != null ? String(raw).trim() : "";
+    if (!t || seen.has(t)) return;
+    if (!Expo.isExpoPushToken(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  if (Array.isArray(labour.pushTokens)) {
+    for (let i = labour.pushTokens.length - 1; i >= 0; i--) {
+      push(labour.pushTokens[i]);
+    }
+  }
+  if (labour.pushToken) push(labour.pushToken);
+  return out;
+}
+
+async function sendLabourAppBulkChunked(tokens, title, body, data) {
+  let anyOk = false;
+  for (let i = 0; i < tokens.length; i += EXPO_PUSH_CHUNK) {
+    const slice = tokens.slice(i, i + EXPO_PUSH_CHUNK);
+    const res = await sendNotificationLabourAppBulk(slice, title, body, data);
+    if (res?.tickets?.some((t) => t?.status === "ok")) anyOk = true;
+  }
+  return anyOk;
+}
+
 /**
  * POST body: { jobId, labourId }
  * Sends Expo push to the user who posted the job requirement
  */
 export const sendJobApplicationNotificationToPoster = async (req, res) => {
   try {
-    const { jobId, labourId } = req.body || {};
+    const payload = req.body || {};
+    const jobId = payload.jobId || payload.job_id;
+    const labourId = payload.labourId || payload.labour_id;
 
     if (!jobId || !labourId) {
       return res.status(400).json({
         success: false,
-        message: "jobId and labourId are required in body",
+        message: "jobId (or job_id) and labourId (or labour_id) are required in body",
       });
     }
 
@@ -92,36 +156,23 @@ export const sendJobApplicationNotificationToPoster = async (req, res) => {
 
     const labourName = labour.name || "A worker";
     const title = "New application for your requirement";
-    const body = `${labourName} applied for your requirement tomorrow, please review it and select and confirm on call.`;
+    const messageBody = `${labourName} applied for your requirement tomorrow, please review it and select and confirm on call.`;
 
     let notificationSent = false;
     try {
-      const result = await sendNotificationUserApp(user.pushToken, title, body, {
+      const result = await sendNotificationUserApp(user.pushToken, title, messageBody, {
         jobId,
         labourId,
         type: "job_requirement_application",
       });
       const tickets = result?.tickets || [];
-
-      const nonErrorTicket = tickets.find((t) => t && t.status && t.status !== "error");
-
-      if (nonErrorTicket && nonErrorTicket.id) {
-        try {
-          const expo = new Expo();
-          const receiptIds = [nonErrorTicket.id];
-          const receipts = await expo.getPushNotificationReceiptsAsync(receiptIds);
-
-          const receipt = receipts?.[nonErrorTicket.id];
-          if (receipt && receipt.status === "ok") {
-            notificationSent = true;
-          } else {
-            console.warn("sendJobApplicationNotificationToPoster: non-ok receipt", receipt);
-          }
-        } catch (receiptErr) {
-          console.warn("sendJobApplicationNotificationToPoster: error checking receipts", receiptErr);
-        }
+      // Expo accepts the message when ticket.status === "ok". Receipts are often still
+      // "pending" if fetched immediately — do not treat that as failure.
+      const accepted = tickets.some((t) => t && t.status === "ok");
+      if (accepted) {
+        notificationSent = true;
       } else {
-        console.warn("sendJobApplicationNotificationToPoster: no valid tickets from Expo", tickets);
+        console.warn("sendJobApplicationNotificationToPoster: no ok ticket from Expo", tickets);
       }
     } catch (sendErr) {
       console.error("sendJobApplicationNotificationToPoster: send failed", sendErr);
@@ -181,18 +232,42 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
 
     const jobTypeNorm = (job.jobType || "").trim().toLowerCase();
 
-    const labours = await LaborModel.find({
-      designation: { $regex: new RegExp(`^${jobTypeNorm}$`, "i") },
-      pushToken: { $exists: true, $ne: null, $ne: "" },
-    })
-      .select("_id pushToken designation last_known_location location labor_chowk_coords address")
+    const hasReachablePush = {
+      $or: [
+        { pushToken: { $exists: true, $nin: [null, ""] } },
+        { pushTokens: { $elemMatch: { $nin: [null, ""] } } },
+      ],
+    };
+
+    const labourQuery = { $and: [hasReachablePush] };
+    if (jobTypeNorm && jobTypeNorm !== "other") {
+      const typeRegex = new RegExp(escapeRegex(jobTypeNorm), "i");
+      labourQuery.$and.push({
+        $or: [
+          { designation: { $regex: typeRegex } },
+          { "skillSet.type": { $regex: typeRegex } },
+        ],
+      });
+    }
+
+    const labours = await LaborModel.find(labourQuery)
+      .select(
+        "_id pushToken pushTokens designation skillSet last_known_location location labor_chowk_coords address"
+      )
       .lean();
+
+    if (!labours.length) {
+      console.warn(
+        `[notifyLabours] no workers matched job type + push filters (karigarDB.labors).`
+      );
+    }
 
     const withinRadius = labours.filter((l) => {
       const coords = getLabourCoords(l);
       if (!coords) return false;
       const dist = haversineKm(coords.lat, coords.lng, jobLat, jobLng);
-      return dist <= LABOUR_WORK_RADIUS_KM;
+      if (dist > LABOUR_WORK_RADIUS_KM) return false;
+      return labourMatchesJobType(l, jobTypeNorm);
     });
 
     const titleEn = "New job requirement";
@@ -200,19 +275,19 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
     const titleHi = "नया काम का आर्डर";
     const bodyHi = "एक नया काम का आर्डर उपलब्ध है। कृपया ऐप पर अप्लाई करें।";
 
-    let notificationSentTo = 0;
+    /** Distinct labours for whom at least one push (En or Hi) was accepted by Expo */
+    let laboursNotifiedOk = 0;
 
     for (const labour of withinRadius) {
-      const token = labour.pushToken;
-      if (!token || !Expo.isExpoPushToken(token)) continue;
+      const tokens = resolveAllLabourExpoTokens(labour);
+      if (!tokens.length) continue;
 
       const data = { jobId, type: "new_job_requirement" };
+      let labourGotOk = false;
 
       try {
-        const resEn = await sendNotificationLabourApp(token, titleEn, bodyEn, data);
-        if (Array.isArray(resEn?.tickets) && resEn.tickets[0]?.status === "ok") {
-          notificationSentTo += 1;
-        }
+        const okEn = await sendLabourAppBulkChunked(tokens, titleEn, bodyEn, data);
+        if (okEn) labourGotOk = true;
       } catch (e) {
         console.warn(
           "notifyLaboursForNewJobRequirement: English send failed for labour",
@@ -222,10 +297,8 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       }
 
       try {
-        const resHi = await sendNotificationLabourApp(token, titleHi, bodyHi, data);
-        if (Array.isArray(resHi?.tickets) && resHi.tickets[0]?.status === "ok") {
-          notificationSentTo += 1;
-        }
+        const okHi = await sendLabourAppBulkChunked(tokens, titleHi, bodyHi, data);
+        if (okHi) labourGotOk = true;
       } catch (e) {
         console.warn(
           "notifyLaboursForNewJobRequirement: Hindi send failed for labour",
@@ -233,6 +306,8 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
           e.message
         );
       }
+
+      if (labourGotOk) laboursNotifiedOk += 1;
     }
 
     const userWhoPosted = await userModel
@@ -247,7 +322,10 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       job.jobType || ""
     );
 
-    if (notificationSentTo === 0 && Expo.isExpoPushToken(userWhoPosted?.pushToken || "")) {
+    if (laboursNotifiedOk === 0 && Expo.isExpoPushToken(userWhoPosted?.pushToken || "")) {
+      console.log(
+        `[notifyLabours] sending no labours available (jobId=${jobId}, poster=${userWhoPosted?._id ?? "unknown"})`
+      );
       try {
         await sendNotificationUserApp(
           userWhoPosted.pushToken,
@@ -260,7 +338,7 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       }
     }
 
-    await LabourRequirementModel.findByIdAndUpdate(jobId, { notificationSentTo });
+    await LabourRequirementModel.findByIdAndUpdate(jobId, { notificationSentTo: laboursNotifiedOk });
 
     return {
       status: 200,
@@ -268,7 +346,8 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
         success: true,
         message: "Notifications sent to labours",
         laboursNotified: withinRadius.length,
-        notificationSentTo,
+        laboursNotifiedOk,
+        notificationSentTo: laboursNotifiedOk,
       },
     };
   } catch (error) {
@@ -317,23 +396,32 @@ export const notifyLabourSelectedForTheJob = async (req, res) => {
       return res.status(404).json({ success: false, message: "Job not found" });
     }
 
-    const labour = await LaborModel.findById(labourId).select("name pushToken").lean();
+    const labour = await LaborModel.findById(labourId).select("name pushToken pushTokens").lean();
     if (!labour) {
       return res.status(404).json({ success: false, message: "Labour not found" });
     }
 
-    const token = labour.pushToken;
+    const tokens = resolveAllLabourExpoTokens(labour);
+    if (!tokens.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Labour has no valid Expo push token",
+      });
+    }
     const data = { jobId, type: "labour_selected", screen: "job_details/" + jobId };
-    const notifyRes = await sendNotificationLabourApp(
-      token,
-      "आपको काम के लिए बुलाया गया है",
-      "आपने जिस काम के लिए आवेदन किया था, उसके लिए आपका चयन हो गया है। कृपया आवेदन खोलकर जांच लें।",
-      data
-    );
+    const titleSel = "आपको काम के लिए बुलाया गया है";
+    const bodySel =
+      "आपने जिस काम के लिए आवेदन किया था, उसके लिए आपका चयन हो गया है। कृपया आवेदन खोलकर जांच लें।";
+    let notifyOk = false;
+    try {
+      notifyOk = await sendLabourAppBulkChunked(tokens, titleSel, bodySel, data);
+    } catch (e) {
+      console.warn("notifyLabourSelectedForTheJob: bulk send failed", labourId, e.message);
+    }
 
     await notifyTeamAboutLabourSelectionOnWhatsapp(jobId, labour.name, job.jobDate);
 
-    if (Array.isArray(notifyRes?.tickets) && notifyRes.tickets[0]?.status === "ok") {
+    if (notifyOk) {
       return res.status(200).json({ success: true, message: "Notification sent to labour" });
     }
     return res.status(500).json({ success: false, message: "Failed to send notification to labour" });
