@@ -9,6 +9,7 @@ import {
 import { Expo } from "expo-server-sdk";
 import { notifyTeamForLabourRequirement } from "../../services/teamNotifications.js";
 import { notifyTeamAboutLabourSelectionOnWhatsapp } from "../../services/teamWhatsappNotifications.js";
+import { aggregateLaboursWithinRadiusKm } from "../../services/labourGeoAggregation.js";
 
 const LABOUR_WORK_RADIUS_KM = 15;
 
@@ -39,43 +40,6 @@ function labourMatchesJobType(labour, jobTypeNorm) {
     if (sn === jobTypeNorm || sn.includes(jobTypeNorm) || word.test(skillName)) return true;
   }
   return false;
-}
-
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-function getLabourCoords(labour) {
-  if (Array.isArray(labour.last_known_location) && labour.last_known_location.length >= 2) {
-    const lng = Number(labour.last_known_location[0]);
-    const lat = Number(labour.last_known_location[1]);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  }
-  if (labour.location?.latitude != null && labour.location?.longitude != null) {
-    const lat = Number(labour.location.latitude);
-    const lng = Number(labour.location.longitude);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  }
-  if (Array.isArray(labour.labor_chowk_coords) && labour.labor_chowk_coords.length >= 2) {
-    const lng = Number(labour.labor_chowk_coords[0]);
-    const lat = Number(labour.labor_chowk_coords[1]);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  }
-  if (Array.isArray(labour.address?.locationCoords) && labour.address.locationCoords.length >= 2) {
-    const lng = Number(labour.address.locationCoords[0]);
-    const lat = Number(labour.address.locationCoords[1]);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  }
-  return null;
 }
 
 const EXPO_PUSH_CHUNK = 99;
@@ -328,84 +292,107 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       };
     }
 
-    const jobTypeNorm = (job.jobType || "").trim().toLowerCase();
+    /** Prebook jobs notify team only; nearby workers are not broadcast to. */
+    const isPrebook =
+      String(job.type ?? "broadcast").trim().toLowerCase() === "prebook";
 
-    const hasReachablePush = {
-      $or: [
-        { pushToken: { $exists: true, $nin: [null, ""] } },
-        { pushTokens: { $elemMatch: { $nin: [null, ""] } } },
-      ],
-    };
-
-    const labourQuery = { $and: [hasReachablePush] };
-    if (jobTypeNorm && jobTypeNorm !== "other") {
-      const typeRegex = new RegExp(escapeRegex(jobTypeNorm), "i");
-      labourQuery.$and.push({
-        $or: [
-          { designation: { $regex: typeRegex } },
-          { "skillSet.type": { $regex: typeRegex } },
-        ],
-      });
-    }
-
-    const labours = await LaborModel.find(labourQuery)
-      .select(
-        "_id pushToken pushTokens designation skillSet last_known_location location labor_chowk_coords address"
-      )
-      .lean();
-
-    if (!labours.length) {
-      console.warn(
-        `[notifyLabours] no workers matched job type + push filters (karigarDB.labors).`
-      );
-    }
-
-    const withinRadius = labours.filter((l) => {
-      const coords = getLabourCoords(l);
-      if (!coords) return false;
-      const dist = haversineKm(coords.lat, coords.lng, jobLat, jobLng);
-      if (dist > LABOUR_WORK_RADIUS_KM) return false;
-      return labourMatchesJobType(l, jobTypeNorm);
-    });
-
-    const titleEn = "New job requirement";
-    const bodyEn = "A new job requirement is available. Please apply on the app.";
-    const titleHi = "नया काम का आर्डर";
-    const bodyHi = "एक नया काम का आर्डर उपलब्ध है। कृपया ऐप पर अप्लाई करें।";
-
+    let withinRadius = [];
     /** Distinct labours for whom at least one push (En or Hi) was accepted by Expo */
     let laboursNotifiedOk = 0;
 
-    for (const labour of withinRadius) {
-      const tokens = resolveAllLabourExpoTokens(labour);
-      if (!tokens.length) continue;
+    if (!isPrebook) {
+      const jobTypeNorm = (job.jobType || "").trim().toLowerCase();
 
-      const data = { jobId, type: "new_job_requirement" };
-      let labourGotOk = false;
+      const hasReachablePush = {
+        $or: [
+          { pushToken: { $exists: true, $nin: [null, ""] } },
+          { pushTokens: { $elemMatch: { $nin: [null, ""] } } },
+        ],
+      };
 
-      try {
-        const okEn = await sendLabourAppBulkChunked(tokens, titleEn, bodyEn, data);
-        if (okEn) labourGotOk = true;
-      } catch (e) {
+      const labourQuery = { $and: [hasReachablePush] };
+      if (jobTypeNorm && jobTypeNorm !== "other") {
+        const typeRegex = new RegExp(escapeRegex(jobTypeNorm), "i");
+        labourQuery.$and.push({
+          $or: [
+            { designation: { $regex: typeRegex } },
+            { "skillSet.type": { $regex: typeRegex } },
+          ],
+        });
+      }
+
+      /** Distance + radius in MongoDB ($expr haversine); designation/push filters stay in $match. */
+      let geoCandidates = await aggregateLaboursWithinRadiusKm(
+        LaborModel,
+        labourQuery,
+        jobLat,
+        jobLng,
+        LABOUR_WORK_RADIUS_KM
+      );
+
+      const fromMongoQuery = geoCandidates.length;
+      if (!fromMongoQuery) {
         console.warn(
-          "notifyLaboursForNewJobRequirement: English send failed for labour",
-          labour._id,
-          e.message
+          `[notifyLabours] no workers within ${LABOUR_WORK_RADIUS_KM}km + job type/push filters (karigarDB.labors).`
         );
       }
 
-      try {
-        const okHi = await sendLabourAppBulkChunked(tokens, titleHi, bodyHi, data);
-        if (okHi) labourGotOk = true;
-      } catch (e) {
-        console.warn(
-          "notifyLaboursForNewJobRequirement: Hindi send failed for labour",
-          labour._id,
-          e.message
-        );
+      withinRadius = geoCandidates.filter((l) => labourMatchesJobType(l, jobTypeNorm));
+      const afterManualRefine = withinRadius.length;
+      const droppedByManualRefine = fromMongoQuery - afterManualRefine;
+
+      if (fromMongoQuery > 0) {
+        if (droppedByManualRefine > 0) {
+          console.log(
+            `[notifyLabours] sources: mongo aggregate=${fromMongoQuery} → manual labourMatchesJobType refine: kept ${afterManualRefine}, dropped ${droppedByManualRefine} (jobId=${jobId})`
+          );
+        } else {
+          console.log(
+            `[notifyLabours] sources: ${fromMongoQuery} candidate(s) from mongo aggregate only; manual refine unchanged (jobId=${jobId})`
+          );
+        }
       }
 
-      if (labourGotOk) laboursNotifiedOk += 1;
+      const titleEn = "New job requirement";
+      const bodyEn = "A new job requirement is available. Please apply on the app.";
+      const titleHi = "नया काम का आर्डर";
+      const bodyHi = "एक नया काम का आर्डर उपलब्ध है। कृपया ऐप पर अप्लाई करें।";
+
+      for (const labour of withinRadius) {
+        const tokens = resolveAllLabourExpoTokens(labour);
+        if (!tokens.length) continue;
+
+        const data = { jobId, type: "new_job_requirement" };
+        let labourGotOk = false;
+
+        try {
+          const okEn = await sendLabourAppBulkChunked(tokens, titleEn, bodyEn, data);
+          if (okEn) labourGotOk = true;
+        } catch (e) {
+          console.warn(
+            "notifyLaboursForNewJobRequirement: English send failed for labour",
+            labour._id,
+            e.message
+          );
+        }
+
+        try {
+          const okHi = await sendLabourAppBulkChunked(tokens, titleHi, bodyHi, data);
+          if (okHi) labourGotOk = true;
+        } catch (e) {
+          console.warn(
+            "notifyLaboursForNewJobRequirement: Hindi send failed for labour",
+            labour._id,
+            e.message
+          );
+        }
+
+        if (labourGotOk) laboursNotifiedOk += 1;
+      }
+    } else {
+      console.log(
+        `[notifyLabours] skip labour Expo pushes (type=prebook, jobId=${jobId}); team notify still sent`
+      );
     }
 
     const userWhoPosted = await userModel
@@ -420,7 +407,11 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       job.jobType || ""
     );
 
-    if (laboursNotifiedOk === 0 && Expo.isExpoPushToken(userWhoPosted?.pushToken || "")) {
+    if (
+      !isPrebook &&
+      laboursNotifiedOk === 0 &&
+      Expo.isExpoPushToken(userWhoPosted?.pushToken || "")
+    ) {
       console.log(
         `[notifyLabours] sending no labours available (jobId=${jobId}, poster=${userWhoPosted?._id ?? "unknown"})`
       );
@@ -442,7 +433,10 @@ export async function runNotifyLaboursForNewJobRequirement(jobId) {
       status: 200,
       json: {
         success: true,
-        message: "Notifications sent to labours",
+        message: isPrebook
+          ? "Team notified; labour broadcasts skipped (prebook)"
+          : "Notifications sent to labours",
+        labourNotifySkippedPrebook: isPrebook,
         laboursNotified: withinRadius.length,
         laboursNotifiedOk,
         notificationSentTo: laboursNotifiedOk,

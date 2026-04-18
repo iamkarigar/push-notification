@@ -10,10 +10,31 @@ export const JOB_TYPES = [
   "helper",
   "other",
 ];
-
 // contactMode: how user wants to be contacted
 export const CONTACT_MODES = ["phone", "app"]; // "apply" from app is mapped to "app"
 
+export const JOB_REQUIREMENT_STATUSES = ["pending", "confirmed", "cancelled", "completed"];
+
+const paymentDetailsSchema = new mongoose.Schema(
+  {
+    paymentId: { type: String },
+    paidOn: { type: Date, default: null },
+    paidAmount: { type: Number, default: null },
+    /** `{ [chargeDisplayName]: amountRupees }` — server catalogue only; set by Razorpay link flow. */
+    extraCharges: { type: mongoose.Schema.Types.Mixed, default: null },
+    paymentMode: { type: String, default: "offline" },
+    paymentStatus: { type: String, default: "unpaid" },
+    /** PayU Payment Links (admin labour job checkout). */
+    paymentLinkUrl: { type: String, default: null },
+    /** Razorpay Payment Link (labour order checkout). */
+    razorpayPaymentLinkId: { type: String, default: null },
+    razorpayReferenceId: { type: String, default: null },
+    amountPaise: { type: Number, default: null },
+    razorpayLinkCreatedAt: { type: Date, default: null },
+
+  },
+  { _id: false }
+);
 // Same shape as elsewhere: from Google Geocode (getAddressObjectFromString)
 // location: GeoJSON Point for $geoNear / 2dsphere (coordinates = [lng, lat])
 const addressSchema = new mongoose.Schema(
@@ -39,7 +60,11 @@ const labourRequirementSchema = new mongoose.Schema(
       default: Date.now,
     },
     // App fields
-    
+    type: {
+      type: String,
+      enum: ["prebook", "broadcast"],
+      default: "broadcast",
+    },
     jobDate: { type: Date, default: null },
     address: {
       type: addressSchema,
@@ -52,6 +77,28 @@ const labourRequirementSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    status: {
+      type: String,
+      default: "pending",
+      enum: JOB_REQUIREMENT_STATUSES,
+    },
+    statusDetails: {
+      selectedLabourIds: [
+        {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Labor",
+        },
+      ],
+      totalOrderValue: { type: Number, default: null },
+      paymentDetails: {
+        type: paymentDetailsSchema,
+        default: null,
+      },
+      /** Admin / ops free-text (e.g. payment, visit outcome). */
+      notes: { type: String, default: null },
+      /** Set when Razorpay payment link is fully paid (prebook checkout complete). */
+      prebookEnteredAt: { type: Date, default: null },
     },
     jobType: {
       type: String,
@@ -95,4 +142,3 @@ export const LabourRequirementModel = ordersDb.model(
   labourRequirementSchema,
   "labour_job_requirements"
 );
-
