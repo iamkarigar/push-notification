@@ -19,3 +19,15 @@ export function getTeamUsersCollection() {
   if (!client) throw new Error("DB not connected");
   return client.db("TEAM").collection("users");
 }
+
+/**
+ * Scheduler queue is maintained by karigar-admin/admin-backend in analytics DB.
+ */
+export function getScheduledNotificationsCollection() {
+  if (!client) throw new Error("DB not connected");
+  const dbName = String(process.env.ANALYTICS_DB_NAME || "referral").trim() || "referral";
+  const coll =
+    String(process.env.ANALYTICS_SCHEDULED_NOTIFICATION_COLLECTION || "scheduled_notifications")
+      .trim() || "scheduled_notifications";
+  return client.db(dbName).collection(coll);
+}

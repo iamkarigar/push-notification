@@ -5,6 +5,7 @@ import { connectMongoose } from "./config/mongoose.js";
 import teamRoutes from "./routes/teamRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import { startTeamCollectionWatchers } from "./watchers/teamCollectionWatchers.js";
+import { startScheduledNotificationsWatcher } from "./services/scheduledNotificationsWatcher.js";
 
 const app = express();
 app.use(express.json());
@@ -26,6 +27,8 @@ async function main() {
     console.log(`Karigar Notifications listening on port ${PORT}`);
     // Change streams → internal HTTP calls; start after listen so fetch() succeeds.
     startTeamCollectionWatchers();
+    // Poll scheduler queue (written by karigar-admin/admin-backend) and send Expo notifications.
+    startScheduledNotificationsWatcher();
   });
 }
 
