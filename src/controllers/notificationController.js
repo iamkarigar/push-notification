@@ -5,7 +5,8 @@ import { sendNewOrderSMS } from "./smsController.js";
 import { notifyUserMaterialOrderStatusFromDoc } from "../services/materialOrderUserNotifications.js";
 
 const expo = new Expo();
-
+/** https://docs.expo.dev/push-notifications/sending-notifications/ — max 100 per request */
+const EXPO_PUSH_BATCH_MAX = 100;
 
 export const sendNotificationUserApp = async (token, title, description, data = {}) => {
   if (!token) {
@@ -31,9 +32,6 @@ export const sendNotificationUserApp = async (token, title, description, data = 
 };
 
 export const sendNotificationUserAppBulk = async (tokens, title, description, data = {}) => {
-  
-  console.log(tokens);
-  
   if (!tokens?.length) {
     return { success: false, message: "Missing push tokens" };
   }
@@ -48,7 +46,11 @@ export const sendNotificationUserAppBulk = async (tokens, title, description, da
     priority: "high",
     _contentAvailable: true,
   }));
-  const tickets = await client.sendPushNotificationsAsync(messages);
+  const tickets = [];
+  for (let i = 0; i < messages.length; i += EXPO_PUSH_BATCH_MAX) {
+    const chunk = messages.slice(i, i + EXPO_PUSH_BATCH_MAX);
+    tickets.push(...(await client.sendPushNotificationsAsync(chunk)));
+  }
   return { success: true, tickets };
 };
 
@@ -78,7 +80,7 @@ export const sendNotificationLabourAppBulk = async (tokens, title, description, 
   if (!tokens) {
     return { success: false, message: "Missing push tokens" };
   }
-  const expo = new Expo();
+  const client = new Expo();
   const messages = tokens.map(token => ({
     to: token,
     title,
@@ -87,7 +89,11 @@ export const sendNotificationLabourAppBulk = async (tokens, title, description, 
     channelId: "custom-sound-channel",
     sound: "ring_phone.mp3",
   }));
-  const tickets = await expo.sendPushNotificationsAsync(messages);
+  const tickets = [];
+  for (let i = 0; i < messages.length; i += EXPO_PUSH_BATCH_MAX) {
+    const chunk = messages.slice(i, i + EXPO_PUSH_BATCH_MAX);
+    tickets.push(...(await client.sendPushNotificationsAsync(chunk)));
+  }
   return { success: true, tickets };
 };
 

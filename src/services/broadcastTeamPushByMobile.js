@@ -2,6 +2,7 @@ import { Expo } from "expo-server-sdk";
 import userModel from "../models/UserModel.js";
 
 const expo = new Expo();
+const EXPO_PUSH_BATCH_MAX = 100;
 
 /**
  * Team mobiles (Karigar `users` collection `mobile_number`) that receive internal Expo alerts.
@@ -75,7 +76,11 @@ export async function sendExpoToUsersByBroadcastMobiles(title, text, data = {}) 
     _contentAvailable: true,
   }));
 
-  const tickets = await expo.sendPushNotificationsAsync(messages);
+  const tickets = [];
+  for (let i = 0; i < messages.length; i += EXPO_PUSH_BATCH_MAX) {
+    const chunk = messages.slice(i, i + EXPO_PUSH_BATCH_MAX);
+    tickets.push(...(await expo.sendPushNotificationsAsync(chunk)));
+  }
   return {
     success: true,
     usersMatched: users.length,

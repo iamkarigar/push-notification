@@ -6,11 +6,14 @@ import { ArchitectModel } from "../models/ArchitectModel.js";
 import { getScheduledNotificationModel } from "../models/ScheduledNotificationModel.js";
 
 const expo = new Expo();
+/** Expo `sendPushNotificationsAsync` rejects more than this many messages per call. */
+const EXPO_PUSH_BATCH_MAX = 100;
 let watcherTimer = null;
+let watcherStream = null;
 let busy = false;
 
 function parseTestNotificationNumbers() {
-  return String(process.env.TEAM_MEMBERS_NUMBERS || "")
+  return String(process.env.TEST_NOTIFICATION_NUMBERS || "")
     .split(/[,\n]/)
     .map((s) => s.trim())
     .filter(Boolean);
@@ -141,7 +144,12 @@ async function sendScheduledNotification(item) {
     _contentAvailable: true,
   }));
 
-  const tickets = await expo.sendPushNotificationsAsync(messages);
+  const tickets = [];
+  for (let i = 0; i < messages.length; i += EXPO_PUSH_BATCH_MAX) {
+    const chunk = messages.slice(i, i + EXPO_PUSH_BATCH_MAX);
+    const batchTickets = await expo.sendPushNotificationsAsync(chunk);
+    tickets.push(...batchTickets);
+  }
   const hasErrorTicket = tickets.some((t) => t?.status === "error");
   return {
     ok: !hasErrorTicket,
@@ -232,8 +240,48 @@ async function tick() {
   }
 }
 
+function isDueNow(item) {
+  const when = new Date(item?.scheduledFor || 0);
+  return Number.isFinite(when.getTime()) && when.getTime() <= Date.now();
+}
+
+function startInstantInsertWatcher(Model) {
+  if (watcherStream) return;
+  try {
+    watcherStream = Model.collection.watch([{ $match: { operationType: "insert" } }], {
+      fullDocument: "default",
+    });
+    watcherStream.on("change", async (event) => {
+      try {
+        const doc = event?.fullDocument;
+        if (!doc?._id) return;
+        if (String(doc.status || "").toLowerCase() !== "pending") return;
+        if (!isDueNow(doc)) return;
+        console.log(
+          `[scheduledNotificationsWatcher] instant due doc detected _id=${doc._id}; processing now`
+        );
+        await processOne(doc, Model);
+      } catch (err) {
+        console.error("[scheduledNotificationsWatcher] instant change handler:", err?.message || err);
+      }
+    });
+    watcherStream.on("error", (err) => {
+      console.error("[scheduledNotificationsWatcher] stream error:", err?.message || err);
+    });
+    watcherStream.on("close", () => {
+      watcherStream = null;
+      console.warn("[scheduledNotificationsWatcher] stream closed");
+    });
+    console.log("[scheduledNotificationsWatcher] instant insert watcher started");
+  } catch (err) {
+    console.error("[scheduledNotificationsWatcher] failed to start instant watcher:", err?.message || err);
+    watcherStream = null;
+  }
+}
+
 export function startScheduledNotificationsWatcher() {
   if (watcherTimer) return;
+  const Model = getScheduledNotificationModel();
   const everyMs = Math.max(
     5000,
     Number.parseInt(String(process.env.SCHEDULE_WATCH_INTERVAL_MS || "15000"), 10) || 15000
@@ -241,6 +289,7 @@ export function startScheduledNotificationsWatcher() {
   watcherTimer = setInterval(() => {
     tick();
   }, everyMs);
+  startInstantInsertWatcher(Model);
   tick();
   console.log(`[scheduledNotificationsWatcher] started. interval=${everyMs}ms`);
 }
