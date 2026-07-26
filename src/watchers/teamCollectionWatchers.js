@@ -3,6 +3,7 @@ import userModel from "../models/UserModel.js";
 import { LaborModel } from "../models/laborModel.js";
 import { MerchentModel } from "../models/MerchentModel.js";
 import MaterialOrderModel from "../models/MaterialOrderModel.js";
+import EquipmentBookingModel from "../models/EquipmentBookingModel.js";
 import { LabourRequirementModel } from "../models/labourRequirementModel.js";
 import { LabourApplyModel } from "../models/labourApplyModel.js";
 import {
@@ -14,6 +15,10 @@ import {
   notifyLaboursForNewJobRequirementBasic,
 } from "../services/teamNotificationBasicFunctions.js";
 import { notifyUserMaterialOrderStatusFromDoc } from "../services/materialOrderUserNotifications.js";
+import {
+  notifyEquipmentBookingConfirmedFromDoc,
+  notifyEquipmentBookingInitiatedFromDoc,
+} from "../services/equipmentBookingNotifications.js";
 import { runNotifyPosterOfJobApplication } from "../controllers/labourJobsNotifications/immidiate.js";
 
 function toBool(val, defaultValue = false) {
@@ -185,6 +190,92 @@ function startMaterialOrderStatusUpdateWatcher({ logPrefix, collection, getDedup
   };
 }
 
+/**
+ * Watches equipment booking updates when status becomes confirmed (payment done).
+ */
+function startEquipmentBookingConfirmedWatcher({
+  logPrefix,
+  collection,
+  getDedupeKey,
+  enabled,
+}) {
+  if (!enabled) {
+    console.log(`${logPrefix} disabled`);
+    return { stop: async () => {} };
+  }
+
+  const seenRecently = createDeduper(5 * 60 * 1000);
+  const pipeline = [
+    {
+      $match: {
+        operationType: "update",
+        $or: [
+          { "updateDescription.updatedFields.status": "confirmed" },
+          { "updateDescription.updatedFields.paymentStatus": "paid" },
+        ],
+      },
+    },
+  ];
+  let changeStream = null;
+  let stopped = false;
+
+  async function open() {
+    if (stopped) return;
+    try {
+      changeStream = collection.watch(pipeline, { fullDocument: "updateLookup" });
+      console.log(
+        `${logPrefix} watching confirmed/paid updates on ${collection.collectionName}`
+      );
+
+      changeStream.on("change", async (event) => {
+        try {
+          const doc = event?.fullDocument;
+          if (!doc) return;
+          if (doc.status !== "confirmed" && doc.paymentStatus !== "paid") return;
+          const key = getDedupeKey(doc);
+          if (!key || seenRecently(key)) return;
+          const out = await notifyEquipmentBookingConfirmedFromDoc(doc);
+          if (!out.success) {
+            console.warn(`${logPrefix} skip or failed:`, out.message || out);
+          }
+        } catch (err) {
+          console.error(`${logPrefix} change handler error:`, err?.message || err);
+        }
+      });
+
+      changeStream.on("error", (err) => {
+        console.error(`${logPrefix} stream error:`, err?.message || err);
+        try {
+          changeStream?.close();
+        } catch (_) {}
+        changeStream = null;
+        setTimeout(open, 2000);
+      });
+
+      changeStream.on("close", () => {
+        if (stopped) return;
+        console.warn(`${logPrefix} stream closed; reopening`);
+        changeStream = null;
+        setTimeout(open, 2000);
+      });
+    } catch (err) {
+      console.error(`${logPrefix} failed to start:`, err?.message || err);
+      setTimeout(open, 3000);
+    }
+  }
+
+  open();
+
+  return {
+    stop: async () => {
+      stopped = true;
+      try {
+        await changeStream?.close();
+      } catch (_) {}
+    },
+  };
+}
+
 function logFailed(prefix, out) {
   if (out.json?.success) return;
   console.error(prefix, out.status, out.json?.message || out.json);
@@ -208,7 +299,8 @@ function whenSub(name, defaultTrue = true) {
  * `ENABLE_TEAM_WATCH_USERS`, `ENABLE_TEAM_WATCH_LABOURS`, `ENABLE_TEAM_WATCH_MERCHANTS`,
  * `ENABLE_TEAM_WATCH_MATERIAL_ORDERS`, `ENABLE_TEAM_WATCH_MATERIAL_ORDER_STATUS`,
  * `ENABLE_TEAM_WATCH_JOB_REQUIREMENTS`, `ENABLE_TEAM_WATCH_JOB_APPLICATIONS`,
- * `ENABLE_TEAM_WATCH_ORDER_INITIATE`.
+ * `ENABLE_TEAM_WATCH_ORDER_INITIATE`,
+ * `ENABLE_TEAM_WATCH_EQUIPMENT_BOOKINGS`, `ENABLE_TEAM_WATCH_EQUIPMENT_BOOKING_CONFIRMED`.
  */
 export function startTeamCollectionWatchers() {
   const stoppers = [];
@@ -221,6 +313,11 @@ export function startTeamCollectionWatchers() {
   const runJobs = whenSub("ENABLE_TEAM_WATCH_JOB_REQUIREMENTS", true);
   const runJobApplications = whenSub("ENABLE_TEAM_WATCH_JOB_APPLICATIONS", true);
   const runOrderInitiate = whenSub("ENABLE_TEAM_WATCH_ORDER_INITIATE", true);
+  const runEquipmentBookings = whenSub("ENABLE_TEAM_WATCH_EQUIPMENT_BOOKINGS", true);
+  const runEquipmentBookingConfirmed = whenSub(
+    "ENABLE_TEAM_WATCH_EQUIPMENT_BOOKING_CONFIRMED",
+    true
+  );
 
   // if (!runUsers && !runLabours && !runMerchants && !runMaterials && !runJobs && !runOrderInitiate) {
   //   console.log(
@@ -365,6 +462,38 @@ export function startTeamCollectionWatchers() {
           const out = await notifyTeamOrderInitiateBasic({ orderId: String(orderId).trim() });
           logFailed("[team-watch-order-initiate]", out);
         },
+        enabled: true,
+      })
+    );
+  }
+
+  if (runEquipmentBookings) {
+    stoppers.push(
+      startInsertWatcher({
+        logPrefix: "[team-watch-equipment-bookings]",
+        collection: EquipmentBookingModel.collection,
+        getDedupeKey: (doc) => String(doc._id),
+        onInsert: async (doc) => {
+          const out = await notifyEquipmentBookingInitiatedFromDoc(doc);
+          if (!out.success) {
+            console.warn(
+              "[team-watch-equipment-bookings] skip or failed:",
+              out.message || out
+            );
+          }
+        },
+        enabled: true,
+      })
+    );
+  }
+
+  if (runEquipmentBookingConfirmed) {
+    stoppers.push(
+      startEquipmentBookingConfirmedWatcher({
+        logPrefix: "[team-watch-equipment-booking-confirmed]",
+        collection: EquipmentBookingModel.collection,
+        getDedupeKey: (doc) =>
+          `${String(doc._id)}:${String(doc.status ?? "")}:${String(doc.paymentStatus ?? "")}`,
         enabled: true,
       })
     );

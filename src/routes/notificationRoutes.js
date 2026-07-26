@@ -17,6 +17,10 @@ import {
 import { notifyTeamLabourRegisteredHandler } from "../controllers/labourController/immidiate.js";
 import { notifyTeamMerchantLoginHandler } from "../controllers/merchantController/immidiate.js";
 import { notifyTeamUserRegisteredHandler } from "../controllers/userNotifications/immidiate.js";
+import {
+  sendEquipmentBookingInitiatedNotification,
+  sendEquipmentBookingConfirmedNotification,
+} from "../controllers/equipmentNotifications/immidiate.js";
 
 const router = express.Router();
 
@@ -35,5 +39,15 @@ router.post("/job-requirement-notify-labours", notifyLaboursForNewJobRequirement
 router.get("/job-requirement-no-application-due", getJobsWithNoApplicationDueForNotify);
 /** Not in original server routes — team WhatsApp + labour Expo when a worker is selected */
 router.post("/job-requirement-labour-selected", notifyLabourSelectedForTheJob);
+
+/** Equipment rental bookings (renter + contractor) */
+router.post(
+  "/equipment-booking-initiated",
+  sendEquipmentBookingInitiatedNotification
+);
+router.post(
+  "/equipment-booking-confirmed",
+  sendEquipmentBookingConfirmedNotification
+);
 
 export default router;
