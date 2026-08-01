@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 
 /**
- * Lean read model for equipment rentals in karigarDB.
+ * Lean read model for equipment rental orders in Orders DB.
  * Matches Karigar_server-new- EquipmentBooking collection.
  */
 const equipmentBookingSchema = new mongoose.Schema(
@@ -33,8 +33,9 @@ const equipmentBookingSchema = new mongoose.Schema(
   }
 );
 
+const ordersDb = mongoose.connection.useDb("Orders", { useCache: true });
 const EquipmentBookingModel =
-  mongoose.models.EquipmentBooking ||
-  mongoose.model("EquipmentBooking", equipmentBookingSchema);
+  ordersDb.models.EquipmentBooking ||
+  ordersDb.model("EquipmentBooking", equipmentBookingSchema, "equipmentbookings");
 
 export default EquipmentBookingModel;
