@@ -4,6 +4,11 @@ import { MerchentModel } from "../models/MerchentModel.js";
 import { LaborModel } from "../models/laborModel.js";
 import { ArchitectModel } from "../models/ArchitectModel.js";
 import { getScheduledNotificationModel } from "../models/ScheduledNotificationModel.js";
+import {
+  computeNextScheduledFor,
+  isRecurring,
+} from "../utils/notificationRecurrence.js";
+import { normalizeVersionOperator, versionMatches } from "../utils/semverCompare.js";
 
 const expo = new Expo();
 /** Expo `sendPushNotificationsAsync` rejects more than this many messages per call. */
@@ -13,10 +18,28 @@ let watcherStream = null;
 let busy = false;
 
 function parseTestNotificationNumbers() {
-  return String(process.env.TEST_NOTIFICATION_NUMBERS || "")
+  const raw =
+    process.env.TEST_NOTIFICATION_NUMBERS ||
+    process.env.TEAM_MEMBERS_NUMBERS ||
+    "";
+  return String(raw)
     .split(/[,\n]/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function pushTokenQuery() {
+  return {
+    $or: [
+      { pushToken: { $nin: [null, ""] } },
+      { "pushTokens.0": { $exists: true } },
+    ],
+  };
+}
+
+function mergeTargetQuery(item, useMerchantVersionField = false) {
+  const versionPlatform = buildFilterByVersionPlatform(item, useMerchantVersionField);
+  return { ...pushTokenQuery(), ...versionPlatform };
 }
 
 function collectExpoTokens(entity) {
@@ -34,20 +57,34 @@ function collectExpoTokens(entity) {
 
 function buildFilterByVersionPlatform(item, useMerchantVersionField = false) {
   const filter = {};
-  const version = String(item.version || "all")
-    .trim()
-    .toLowerCase();
+  const version = String(item.version || "all").trim();
+  const versionLower = version.toLowerCase();
   const platform = String(item.platform || "all")
     .trim()
     .toLowerCase();
+  const op = normalizeVersionOperator(item.versionOperator || "eq");
+  const versionField = useMerchantVersionField ? "app_version" : "version";
 
-  if (version && version !== "all") {
-    filter[useMerchantVersionField ? "app_version" : "version"] = version;
+  // Exact match in Mongo; comparisons applied in memory after fetch.
+  if (version && versionLower !== "all" && op === "eq") {
+    filter[versionField] = version;
   }
   if (platform && platform !== "all") {
     filter.os = platform;
   }
   return filter;
+}
+
+function filterEntitiesByVersionOperator(entities, item, useMerchantVersionField = false) {
+  const version = String(item.version || "all").trim();
+  const versionLower = version.toLowerCase();
+  if (!version || versionLower === "all") return entities;
+  const op = normalizeVersionOperator(item.versionOperator || "eq");
+  if (op === "eq") return entities;
+  const versionField = useMerchantVersionField ? "app_version" : "version";
+  return entities.filter((u) =>
+    versionMatches(u?.[versionField] ?? u?.version, version, op)
+  );
 }
 
 async function getTargetsForSchedule(item) {
@@ -57,7 +94,7 @@ async function getTargetsForSchedule(item) {
     const numbers = parseTestNotificationNumbers();
     if (!numbers.length) return [];
     const users = await userModel
-      .find({ mobile_number: { $in: numbers } })
+      .find({ mobile_number: { $in: numbers }, ...pushTokenQuery() })
       .select("pushToken pushTokens")
       .lean();
     return users.flatMap(collectExpoTokens);
@@ -66,29 +103,28 @@ async function getTargetsForSchedule(item) {
   const app = String(item.app || "").toLowerCase().trim();
   if (app === "users") {
     const users = await userModel
-      .find(buildFilterByVersionPlatform(item))
-      .select("pushToken pushTokens")
+      .find(mergeTargetQuery(item))
+      .select("pushToken pushTokens version os")
       .lean();
-    return users.flatMap(collectExpoTokens);
+    return filterEntitiesByVersionOperator(users, item).flatMap(collectExpoTokens);
   }
   if (app === "merchants") {
-    const merchants = await MerchentModel.find(buildFilterByVersionPlatform(item, true))
-      .select("pushToken pushTokens")
+    const merchants = await MerchentModel.find(mergeTargetQuery(item, true))
+      .select("pushToken pushTokens app_version version os")
       .lean();
-    return merchants.flatMap(collectExpoTokens);
+    return filterEntitiesByVersionOperator(merchants, item, true).flatMap(collectExpoTokens);
   }
   if (app === "worker") {
-    // Worker collection does not consistently carry version/os in every environment.
-    const workers = await LaborModel.find({})
-      .select("pushToken pushTokens")
+    const workers = await LaborModel.find(mergeTargetQuery(item))
+      .select("pushToken pushTokens version os")
       .lean();
-    return workers.flatMap(collectExpoTokens);
+    return filterEntitiesByVersionOperator(workers, item).flatMap(collectExpoTokens);
   }
   if (app === "architect") {
-    const architects = await ArchitectModel.find(buildFilterByVersionPlatform(item))
-      .select("pushToken pushTokens")
+    const architects = await ArchitectModel.find(mergeTargetQuery(item))
+      .select("pushToken pushTokens version os")
       .lean();
-    return architects.flatMap(collectExpoTokens);
+    return filterEntitiesByVersionOperator(architects, item).flatMap(collectExpoTokens);
   }
   return [];
 }
@@ -101,13 +137,13 @@ async function sendScheduledNotification(item) {
           await (async () => {
             const numbers = parseTestNotificationNumbers();
             console.log(
-              `[scheduledNotificationsWatcher] test doc _id=${item?._id} detected; TEAM_MEMBERS_NUMBERS=${JSON.stringify(
+              `[scheduledNotificationsWatcher] test doc _id=${item?._id} detected; TEST_NOTIFICATION_NUMBERS=${JSON.stringify(
                 numbers
               )}`
             );
             if (!numbers.length) return [];
             const users = await userModel
-              .find({ mobile_number: { $in: numbers } })
+              .find({ mobile_number: { $in: numbers }, ...pushTokenQuery() })
               .select("pushToken pushTokens")
               .lean();
             const testTokens = users.flatMap(collectExpoTokens);
@@ -159,6 +195,86 @@ async function sendScheduledNotification(item) {
   };
 }
 
+function buildRecurrenceRequeueUpdate(item, resultOk, resultPayload, errorMessage) {
+  const recurrence = item?.recurrence || {};
+  const dispatch = {
+    endpoint: "karigar-notifications watcher",
+    dispatchedAt: new Date(),
+    acknowledged: !!resultOk,
+    response: resultPayload,
+    error: errorMessage || null,
+  };
+
+  if (!isRecurring(item)) {
+    return {
+      status: resultOk ? "forwarded" : "failed",
+      processedAt: new Date(),
+      analyticsDispatch: dispatch,
+    };
+  }
+
+  const hour = Number.isFinite(recurrence.hour)
+    ? recurrence.hour
+    : null;
+  const minute = Number.isFinite(recurrence.minute)
+    ? recurrence.minute
+    : null;
+
+  let nextFor;
+  try {
+    nextFor = computeNextScheduledFor({
+      from: new Date(item.scheduledFor || Date.now()),
+      frequency: recurrence.frequency,
+      dayOfWeek: recurrence.dayOfWeek,
+      dayOfMonth: recurrence.dayOfMonth,
+      hour: hour ?? 9,
+      minute: minute ?? 0,
+      strictlyAfter: true,
+    });
+  } catch (err) {
+    return {
+      status: resultOk ? "forwarded" : "failed",
+      processedAt: new Date(),
+      analyticsDispatch: {
+        ...dispatch,
+        error:
+          (errorMessage ? errorMessage + "; " : "") +
+          (err?.message || "Failed to compute next recurrence"),
+      },
+    };
+  }
+
+  if (recurrence.endsAt && nextFor.getTime() > new Date(recurrence.endsAt).getTime()) {
+    return {
+      status: resultOk ? "forwarded" : "failed",
+      processedAt: new Date(),
+      analyticsDispatch: {
+        ...dispatch,
+        response: {
+          ...(resultPayload && typeof resultPayload === "object" ? resultPayload : {}),
+          recurrenceEnded: true,
+          nextWouldHaveBeen: nextFor.toISOString(),
+        },
+      },
+    };
+  }
+
+  return {
+    status: "pending",
+    scheduledFor: nextFor,
+    processedAt: new Date(),
+    processingAt: null,
+    analyticsDispatch: {
+      ...dispatch,
+      response: {
+        ...(resultPayload && typeof resultPayload === "object" ? resultPayload : {}),
+        requeued: true,
+        nextScheduledFor: nextFor.toISOString(),
+      },
+    },
+  };
+}
+
 async function processOne(item, Model) {
   const lock = await Model.findOneAndUpdate(
     { _id: item._id, status: "pending" },
@@ -169,42 +285,50 @@ async function processOne(item, Model) {
 
   try {
     const result = await sendScheduledNotification(item);
-    await Model.updateOne(
-      { _id: item._id },
+    const $set = buildRecurrenceRequeueUpdate(
+      item,
+      !!result.ok,
       {
-        $set: {
-          status: result.ok ? "forwarded" : "failed",
-          processedAt: new Date(),
-          analyticsDispatch: {
-            endpoint: "karigar-notifications watcher",
-            dispatchedAt: new Date(),
-            acknowledged: !!result.ok,
-            response: {
-              message: result.message,
-              tokenCount: result.tokenCount || 0,
-              tickets: result.tickets || [],
-            },
-            error: result.ok ? null : result.message,
-          },
-        },
-      }
+        message: result.message,
+        tokenCount: result.tokenCount || 0,
+        tickets: result.tickets || [],
+      },
+      result.ok ? null : result.message
     );
+    if (isRecurring(item) && $set.status === "pending") {
+      console.log(
+        `[scheduledNotificationsWatcher] recurring doc _id=${item._id} re-queued for ${$set.scheduledFor?.toISOString?.() || $set.scheduledFor}`
+      );
+    }
+    await Model.updateOne({ _id: item._id }, { $set });
   } catch (err) {
-    await Model.updateOne(
-      { _id: item._id },
-      {
-        $set: {
-          status: "failed",
-          processedAt: new Date(),
-          analyticsDispatch: {
-            endpoint: "karigar-notifications watcher",
-            dispatchedAt: new Date(),
-            acknowledged: false,
-            response: null,
-            error: err?.message || "Watcher failed to send notification",
-          },
-        },
-      }
+    const $set = buildRecurrenceRequeueUpdate(
+      item,
+      false,
+      null,
+      err?.message || "Watcher failed to send notification"
+    );
+    await Model.updateOne({ _id: item._id }, { $set });
+  }
+}
+
+async function reclaimStuckProcessing(Model) {
+  const staleMs = Math.max(
+    60000,
+    Number.parseInt(String(process.env.SCHEDULE_STALE_PROCESSING_MS || "300000"), 10) || 300000
+  );
+  const cutoff = new Date(Date.now() - staleMs);
+  const result = await Model.updateMany(
+    {
+      status: "processing",
+      $or: [{ processingAt: { $lte: cutoff } }, { processingAt: null }, { processingAt: { $exists: false } }],
+      updatedAt: { $lte: cutoff },
+    },
+    { $set: { status: "pending", processingAt: null } }
+  );
+  if (result?.modifiedCount) {
+    console.warn(
+      `[scheduledNotificationsWatcher] reclaimed ${result.modifiedCount} stuck processing schedule(s)`
     );
   }
 }
@@ -215,6 +339,7 @@ async function tick() {
   try {
     const Model = getScheduledNotificationModel();
     const now = new Date();
+    await reclaimStuckProcessing(Model);
     const due = await Model.find({
         status: "pending",
         scheduledFor: { $lte: now },
